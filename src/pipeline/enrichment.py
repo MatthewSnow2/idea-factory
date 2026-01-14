@@ -68,7 +68,7 @@ async def enrich_idea(idea: Idea) -> EnrichmentOutput:
     """
     logger.info(f"Starting enrichment for idea: {idea.id}")
 
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.0-flash")
 
     prompt = ENRICHMENT_PROMPT.format(
         title=idea.title,
