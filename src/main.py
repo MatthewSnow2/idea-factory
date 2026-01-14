@@ -1,10 +1,19 @@
 """FastAPI entry point for Agentic Idea Factory."""
 
 import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+# Load environment variables: shared first, then local overrides
+shared_env = Path.home() / ".env.shared"
+if shared_env.exists():
+    load_dotenv(shared_env)
+load_dotenv()  # Local .env can override
 
 from .api import ideas, reviews, status
 from .db.repository import repository

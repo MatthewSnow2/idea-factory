@@ -20,6 +20,7 @@ from ..core.models import (
 )
 from ..core.state_machine import state_machine
 from ..db.repository import Repository
+from ..notifications.service import NotificationContext, NotificationService, get_notification_service
 from .building import build_project
 from .enrichment import enrich_idea
 from .evaluation import evaluate_idea
@@ -46,6 +47,68 @@ class PipelineOrchestrator:
     def __init__(self, repository: Repository) -> None:
         self.repo = repository
         self.state_machine = state_machine
+        self.notification_service = get_notification_service()
+
+    async def _send_hil_notification(self, idea: Idea, gate: int) -> None:
+        """Send notifications for a HIL gate.
+
+        Args:
+            idea: The idea at the HIL gate
+            gate: The gate number (1 = post-evaluation, 2 = post-scaffolding)
+        """
+        try:
+            # Gather context for notification
+            enrichment = await self.repo.get_enrichment(idea.id)
+            evaluation = await self.repo.get_evaluation(idea.id)
+            scaffolding = await self.repo.get_scaffolding(idea.id) if gate == 2 else None
+
+            # Build summaries
+            enrichment_summary = None
+            if enrichment:
+                enrichment_summary = (
+                    f"Title: {enrichment.enhanced_title}\n"
+                    f"Problem: {enrichment.problem_statement}\n"
+                    f"Description: {enrichment.enhanced_description[:200]}..."
+                )
+
+            evaluation_summary = None
+            if evaluation:
+                evaluation_summary = (
+                    f"Score: {evaluation.overall_score}/100\n"
+                    f"Recommendation: {evaluation.recommendation.value.upper()}\n"
+                    f"Rationale: {evaluation.recommendation_rationale}"
+                )
+
+            scaffolding_summary = None
+            if scaffolding:
+                tech_stack = ", ".join(scaffolding.tech_stack[:5])
+                scaffolding_summary = (
+                    f"Tech Stack: {tech_stack}\n"
+                    f"Estimated Hours: {scaffolding.estimated_hours or 'N/A'}\n"
+                    f"Blueprint preview: {scaffolding.blueprint_content[:200]}..."
+                )
+
+            # Determine stage for notification
+            stage = "evaluation" if gate == 1 else "scaffolding"
+
+            context = NotificationContext(
+                idea_id=idea.id,
+                title=idea.title,
+                stage=stage,
+                enrichment_summary=enrichment_summary,
+                evaluation_summary=evaluation_summary,
+                scaffolding_summary=scaffolding_summary,
+            )
+
+            result = await self.notification_service.notify_hil_gate(context)
+            logger.info(
+                f"HIL Gate {gate} notification result: "
+                f"email={result.email_sent}, slack={result.slack_sent}"
+            )
+
+        except Exception as e:
+            # Don't fail the pipeline if notifications fail
+            logger.error(f"Failed to send HIL gate {gate} notification: {e}")
 
     async def start_pipeline(self, idea_id: str) -> PipelineResult:
         """Start the pipeline for an idea.
@@ -134,10 +197,14 @@ class PipelineOrchestrator:
             return await self._start_evaluation(idea)
 
         elif idea.current_stage == Stage.EVALUATION and idea.current_status == Status.COMPLETED:
-            # HIL gate - requires human review
+            # HIL gate 1 - requires human review after evaluation
             idea = await self.repo.update_idea_state(
                 idea.id, Stage.HUMAN_REVIEW, Status.AWAITING_REVIEW, triggered_by="pipeline"
             )
+
+            # Send notifications for HIL gate 1
+            await self._send_hil_notification(idea, gate=1)
+
             return PipelineResult(
                 success=True,
                 idea=idea,
@@ -161,10 +228,14 @@ class PipelineOrchestrator:
             )
 
         elif idea.current_stage == Stage.SCAFFOLDING and idea.current_status == Status.COMPLETED:
-            # Second HIL gate - requires human review before building
+            # HIL gate 2 - requires human review before building
             idea = await self.repo.update_idea_state(
                 idea.id, Stage.HUMAN_REVIEW, Status.AWAITING_REVIEW, triggered_by="pipeline"
             )
+
+            # Send notifications for HIL gate 2
+            await self._send_hil_notification(idea, gate=2)
+
             return PipelineResult(
                 success=True,
                 idea=idea,
