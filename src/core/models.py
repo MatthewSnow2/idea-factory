@@ -197,6 +197,29 @@ class HumanReview(BaseModel):
     reviewed_at: datetime
 
 
+class ScaffoldingResult(BaseModel):
+    """Scaffolding result record."""
+
+    idea_id: str
+    blueprint_content: str
+    project_structure: dict[str, list[str]]
+    tech_stack: list[str]
+    estimated_hours: float | None
+    scaffolded_at: datetime
+    scaffolded_by: str
+
+
+class BuildResult(BaseModel):
+    """Build result record."""
+
+    idea_id: str
+    github_repo: str | None
+    artifacts: list[str]
+    outcome: Literal["success", "partial", "failed"]
+    started_at: datetime
+    completed_at: datetime | None
+
+
 class StateTransition(BaseModel):
     """State transition audit record."""
 

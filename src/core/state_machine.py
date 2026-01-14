@@ -56,9 +56,10 @@ VALID_TRANSITIONS: dict[StateKey, list[StateKey]] = {
         StateKey(Stage.EVALUATION, Status.PROCESSING),  # Retry
         StateKey(Stage.ARCHIVED, Status.COMPLETED),
     ],
-    # HUMAN_REVIEW stage (post-evaluation)
+    # HUMAN_REVIEW stage (post-evaluation or post-scaffolding)
     StateKey(Stage.HUMAN_REVIEW, Status.AWAITING_REVIEW): [
-        StateKey(Stage.SCAFFOLDING, Status.PROCESSING),  # approve
+        StateKey(Stage.SCAFFOLDING, Status.PROCESSING),  # approve (first HIL gate)
+        StateKey(Stage.BUILDING, Status.PROCESSING),  # approve (second HIL gate)
         StateKey(Stage.ENRICHMENT, Status.PROCESSING),  # refine
         StateKey(Stage.ARCHIVED, Status.COMPLETED),  # reject
         StateKey(Stage.HUMAN_REVIEW, Status.PAUSED),  # defer

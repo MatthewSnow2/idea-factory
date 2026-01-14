@@ -12,6 +12,8 @@ from uuid import uuid4
 import aiosqlite
 
 from ..core.models import (
+    BuildOutput,
+    BuildResult,
     EnrichmentOutput,
     EnrichmentResult,
     EvaluationOutput,
@@ -20,6 +22,8 @@ from ..core.models import (
     Idea,
     IdeaInput,
     ReviewDecision,
+    ScaffoldingOutput,
+    ScaffoldingResult,
     Stage,
     StateTransition,
     Status,
@@ -365,6 +369,115 @@ class Repository:
                 )
                 for row in rows
             ]
+
+    # =========================================================================
+    # Scaffolding Results
+    # =========================================================================
+
+    async def save_scaffolding(
+        self, idea_id: str, output: ScaffoldingOutput
+    ) -> ScaffoldingResult:
+        """Save scaffolding result."""
+        now = datetime.utcnow().isoformat()
+
+        await self.db.execute(
+            """
+            INSERT OR REPLACE INTO scaffolding_results
+            (idea_id, blueprint_content, project_structure, tech_stack, estimated_hours, scaffolded_at, scaffolded_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                idea_id,
+                output.blueprint_content,
+                json.dumps(output.project_structure),
+                json.dumps(output.tech_stack),
+                output.estimated_hours,
+                now,
+                "claude-sonnet-4",
+            ),
+        )
+        await self.db.commit()
+
+        return ScaffoldingResult(
+            idea_id=idea_id,
+            blueprint_content=output.blueprint_content,
+            project_structure=output.project_structure,
+            tech_stack=output.tech_stack,
+            estimated_hours=output.estimated_hours,
+            scaffolded_at=datetime.fromisoformat(now),
+            scaffolded_by="claude-sonnet-4",
+        )
+
+    async def get_scaffolding(self, idea_id: str) -> ScaffoldingResult | None:
+        """Get scaffolding result for an idea."""
+        async with self.db.execute(
+            "SELECT * FROM scaffolding_results WHERE idea_id = ?", (idea_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            return ScaffoldingResult(
+                idea_id=row["idea_id"],
+                blueprint_content=row["blueprint_content"],
+                project_structure=json.loads(row["project_structure"]),
+                tech_stack=json.loads(row["tech_stack"]),
+                estimated_hours=row["estimated_hours"],
+                scaffolded_at=datetime.fromisoformat(row["scaffolded_at"]),
+                scaffolded_by=row["scaffolded_by"],
+            )
+
+    # =========================================================================
+    # Build Results
+    # =========================================================================
+
+    async def save_build(
+        self, idea_id: str, output: BuildOutput, started_at: datetime
+    ) -> BuildResult:
+        """Save build result."""
+        now = datetime.utcnow().isoformat()
+
+        await self.db.execute(
+            """
+            INSERT OR REPLACE INTO build_results
+            (idea_id, github_repo, artifacts, outcome, started_at, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                idea_id,
+                output.github_repo,
+                json.dumps(output.artifacts),
+                output.outcome,
+                started_at.isoformat(),
+                now,
+            ),
+        )
+        await self.db.commit()
+
+        return BuildResult(
+            idea_id=idea_id,
+            github_repo=output.github_repo,
+            artifacts=output.artifacts,
+            outcome=output.outcome,
+            started_at=started_at,
+            completed_at=datetime.fromisoformat(now),
+        )
+
+    async def get_build(self, idea_id: str) -> BuildResult | None:
+        """Get build result for an idea."""
+        async with self.db.execute(
+            "SELECT * FROM build_results WHERE idea_id = ?", (idea_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            return BuildResult(
+                idea_id=row["idea_id"],
+                github_repo=row["github_repo"],
+                artifacts=json.loads(row["artifacts"]) if row["artifacts"] else [],
+                outcome=row["outcome"],
+                started_at=datetime.fromisoformat(row["started_at"]),
+                completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+            )
 
     # =========================================================================
     # State Transitions

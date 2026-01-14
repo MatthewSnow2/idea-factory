@@ -5,20 +5,25 @@ Coordinates stage execution, state transitions, and HIL gates.
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 
 from ..core.models import (
+    BuildResult,
     EnrichmentResult,
     EvaluationResult,
     Idea,
     ReviewDecision,
+    ScaffoldingResult,
     Stage,
     Status,
 )
 from ..core.state_machine import state_machine
 from ..db.repository import Repository
+from .building import build_project
 from .enrichment import enrich_idea
 from .evaluation import evaluate_idea
+from .scaffolding import scaffold_idea
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +160,33 @@ class PipelineOrchestrator:
                 requires_review=True,
             )
 
+        elif idea.current_stage == Stage.SCAFFOLDING and idea.current_status == Status.COMPLETED:
+            # Second HIL gate - requires human review before building
+            idea = await self.repo.update_idea_state(
+                idea.id, Stage.HUMAN_REVIEW, Status.AWAITING_REVIEW, triggered_by="pipeline"
+            )
+            return PipelineResult(
+                success=True,
+                idea=idea,
+                stage=Stage.HUMAN_REVIEW,
+                status=Status.AWAITING_REVIEW,
+                message="Scaffolding complete. Awaiting human review before building.",
+                requires_review=True,
+            )
+
+        elif idea.current_stage == Stage.BUILDING and idea.current_status == Status.COMPLETED:
+            # Transition to completed
+            idea = await self.repo.update_idea_state(
+                idea.id, Stage.COMPLETED, Status.COMPLETED, triggered_by="pipeline"
+            )
+            return PipelineResult(
+                success=True,
+                idea=idea,
+                stage=Stage.COMPLETED,
+                status=Status.COMPLETED,
+                message="Pipeline completed successfully!",
+            )
+
         else:
             return PipelineResult(
                 success=False,
@@ -272,15 +304,24 @@ class PipelineOrchestrator:
         if not transition.success:
             return PipelineResult(success=False, idea=idea, message=transition.error)
 
-        # Update state
+        # For approval, determine which stage to advance to
+        if decision == ReviewDecision.APPROVE:
+            # Check if we have scaffolding result to determine which HIL gate
+            scaffolding = await self.repo.get_scaffolding(idea_id)
+            if scaffolding:
+                # Second HIL gate (post-scaffolding) - advance to building
+                return await self._start_building(idea)
+            else:
+                # First HIL gate (post-evaluation) - advance to scaffolding
+                return await self._start_scaffolding(idea)
+
+        # Update state for non-approval decisions
         idea = await self.repo.update_idea_state(
             idea_id, transition.new_stage, transition.new_status, triggered_by=reviewer
         )
 
-        # Determine next action
-        if decision == ReviewDecision.APPROVE:
-            message = "Approved! Advancing to scaffolding stage."
-        elif decision == ReviewDecision.REFINE:
+        # Determine message for non-approval decisions
+        if decision == ReviewDecision.REFINE:
             message = "Sent back for refinement. Restarting enrichment."
         elif decision == ReviewDecision.REJECT:
             message = "Rejected and archived."
@@ -294,6 +335,153 @@ class PipelineOrchestrator:
             status=transition.new_status,
             message=message,
         )
+
+    async def _start_scaffolding(self, idea: Idea) -> PipelineResult:
+        """Start the scaffolding stage."""
+        # Get enrichment and evaluation results
+        enrichment = await self.repo.get_enrichment(idea.id)
+        evaluation = await self.repo.get_evaluation(idea.id)
+
+        if not enrichment or not evaluation:
+            return PipelineResult(
+                success=False,
+                idea=idea,
+                message="Cannot scaffold: missing enrichment or evaluation results",
+            )
+
+        # Transition to scaffolding processing
+        result = self.state_machine.transition(
+            idea.current_stage, idea.current_status, Stage.SCAFFOLDING, Status.PROCESSING
+        )
+
+        if not result.success:
+            return PipelineResult(success=False, idea=idea, message=result.error)
+
+        idea = await self.repo.update_idea_state(
+            idea.id, Stage.SCAFFOLDING, Status.PROCESSING, triggered_by="pipeline"
+        )
+
+        return await self._run_scaffolding(idea, enrichment, evaluation)
+
+    async def _run_scaffolding(
+        self,
+        idea: Idea,
+        enrichment: EnrichmentResult,
+        evaluation: EvaluationResult,
+    ) -> PipelineResult:
+        """Run the scaffolding stage."""
+        logger.info(f"Running scaffolding for idea: {idea.id}")
+
+        try:
+            # Execute scaffolding
+            output = await scaffold_idea(idea, enrichment, evaluation)
+
+            # Save result
+            await self.repo.save_scaffolding(idea.id, output)
+
+            # Transition to completed
+            idea = await self.repo.update_idea_state(
+                idea.id, Stage.SCAFFOLDING, Status.COMPLETED, triggered_by="pipeline"
+            )
+
+            logger.info(f"Scaffolding completed for idea: {idea.id}")
+            return PipelineResult(
+                success=True,
+                idea=idea,
+                stage=Stage.SCAFFOLDING,
+                status=Status.COMPLETED,
+                message="Scaffolding completed. Project blueprint generated.",
+            )
+
+        except Exception as e:
+            logger.error(f"Scaffolding failed for idea {idea.id}: {e}")
+
+            # Transition to failed
+            await self.repo.update_idea_state(
+                idea.id, Stage.SCAFFOLDING, Status.FAILED, triggered_by="pipeline"
+            )
+
+            return PipelineResult(
+                success=False,
+                idea=idea,
+                stage=Stage.SCAFFOLDING,
+                status=Status.FAILED,
+                message=f"Scaffolding failed: {e}",
+            )
+
+    async def _start_building(self, idea: Idea) -> PipelineResult:
+        """Start the building stage."""
+        # Get enrichment and scaffolding results
+        enrichment = await self.repo.get_enrichment(idea.id)
+        scaffolding = await self.repo.get_scaffolding(idea.id)
+
+        if not enrichment or not scaffolding:
+            return PipelineResult(
+                success=False,
+                idea=idea,
+                message="Cannot build: missing enrichment or scaffolding results",
+            )
+
+        # Transition to building processing
+        result = self.state_machine.transition(
+            idea.current_stage, idea.current_status, Stage.BUILDING, Status.PROCESSING
+        )
+
+        if not result.success:
+            return PipelineResult(success=False, idea=idea, message=result.error)
+
+        idea = await self.repo.update_idea_state(
+            idea.id, Stage.BUILDING, Status.PROCESSING, triggered_by="pipeline"
+        )
+
+        return await self._run_building(idea, enrichment, scaffolding)
+
+    async def _run_building(
+        self,
+        idea: Idea,
+        enrichment: EnrichmentResult,
+        scaffolding: ScaffoldingResult,
+    ) -> PipelineResult:
+        """Run the building stage."""
+        logger.info(f"Running building for idea: {idea.id}")
+        started_at = datetime.utcnow()
+
+        try:
+            # Execute building
+            output = await build_project(idea.id, enrichment, scaffolding)
+
+            # Save result
+            await self.repo.save_build(idea.id, output, started_at)
+
+            # Transition to completed
+            idea = await self.repo.update_idea_state(
+                idea.id, Stage.BUILDING, Status.COMPLETED, triggered_by="pipeline"
+            )
+
+            logger.info(f"Building completed for idea: {idea.id}")
+            return PipelineResult(
+                success=True,
+                idea=idea,
+                stage=Stage.BUILDING,
+                status=Status.COMPLETED,
+                message=f"Build completed: {len(output.artifacts)} files generated ({output.outcome})",
+            )
+
+        except Exception as e:
+            logger.error(f"Building failed for idea {idea.id}: {e}")
+
+            # Transition to failed
+            await self.repo.update_idea_state(
+                idea.id, Stage.BUILDING, Status.FAILED, triggered_by="pipeline"
+            )
+
+            return PipelineResult(
+                success=False,
+                idea=idea,
+                stage=Stage.BUILDING,
+                status=Status.FAILED,
+                message=f"Building failed: {e}",
+            )
 
     async def run_full_pipeline(self, idea_id: str) -> PipelineResult:
         """Run the full pipeline until a HIL gate is reached.
