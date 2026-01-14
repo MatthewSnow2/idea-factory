@@ -231,11 +231,16 @@ class ChristensenAnalyzer:
         if not self.bridge:
             raise RuntimeError("Analyzer not started")
 
-        arguments: dict[str, Any] = {"scenario": scenario}
+        arguments: dict[str, Any] = {"decision": scenario}  # MCP expects "decision"
         if context:
             arguments["context"] = context
+        # Note: constraints not supported by Christensen MCP, use context instead
         if constraints:
-            arguments["constraints"] = constraints
+            arguments["context"] = (
+                f"{context}\n\nConstraints/Tags: {', '.join(constraints)}"
+                if context
+                else f"Constraints/Tags: {', '.join(constraints)}"
+            )
 
         return await self.bridge.call_tool("analyze_decision", arguments)
 
