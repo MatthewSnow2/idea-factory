@@ -5,7 +5,7 @@ Defines valid transitions and enforces pipeline rules.
 
 from dataclasses import dataclass
 
-from .models import ReviewDecision, Stage, Status
+from .models import ProjectMode, ReviewDecision, Stage, Status
 
 
 @dataclass(frozen=True)
@@ -28,9 +28,22 @@ class TransitionResult:
 
 # Valid transitions: (from_stage, from_status) -> (to_stage, to_status)
 VALID_TRANSITIONS: dict[StateKey, list[StateKey]] = {
-    # INPUT stage
+    # INPUT stage - can go to ENRICHMENT (new) or PROJECT_ANALYSIS (existing)
     StateKey(Stage.INPUT, Status.PENDING): [
+        StateKey(Stage.ENRICHMENT, Status.PROCESSING),  # NEW mode
+        StateKey(Stage.PROJECT_ANALYSIS, Status.PROCESSING),  # EXISTING modes
+    ],
+    # PROJECT_ANALYSIS stage (for existing projects)
+    StateKey(Stage.PROJECT_ANALYSIS, Status.PROCESSING): [
+        StateKey(Stage.PROJECT_ANALYSIS, Status.COMPLETED),
+        StateKey(Stage.PROJECT_ANALYSIS, Status.FAILED),
+    ],
+    StateKey(Stage.PROJECT_ANALYSIS, Status.COMPLETED): [
         StateKey(Stage.ENRICHMENT, Status.PROCESSING),
+    ],
+    StateKey(Stage.PROJECT_ANALYSIS, Status.FAILED): [
+        StateKey(Stage.PROJECT_ANALYSIS, Status.PROCESSING),  # Retry
+        StateKey(Stage.ARCHIVED, Status.COMPLETED),
     ],
     # ENRICHMENT stage
     StateKey(Stage.ENRICHMENT, Status.PROCESSING): [
@@ -165,18 +178,42 @@ class StateMachine:
         """Check if stage requires human review before advancing."""
         return stage in HIL_GATE_STAGES
 
-    def get_next_stage(self, current_stage: Stage) -> Stage | None:
-        """Get the next stage in the pipeline (for auto-progression)."""
-        stage_order = [
-            Stage.INPUT,
-            Stage.ENRICHMENT,
-            Stage.EVALUATION,
-            Stage.HUMAN_REVIEW,
-            Stage.SCAFFOLDING,
-            Stage.HUMAN_REVIEW,  # Second HIL gate
-            Stage.BUILDING,
-            Stage.COMPLETED,
-        ]
+    def get_next_stage(
+        self, current_stage: Stage, mode: ProjectMode = ProjectMode.NEW
+    ) -> Stage | None:
+        """Get the next stage in the pipeline (for auto-progression).
+
+        Args:
+            current_stage: Current pipeline stage
+            mode: Project mode (NEW or EXISTING_*)
+
+        Returns:
+            Next stage or None if at end of pipeline
+        """
+        if mode == ProjectMode.NEW:
+            stage_order = [
+                Stage.INPUT,
+                Stage.ENRICHMENT,
+                Stage.EVALUATION,
+                Stage.HUMAN_REVIEW,
+                Stage.SCAFFOLDING,
+                Stage.HUMAN_REVIEW,  # Second HIL gate
+                Stage.BUILDING,
+                Stage.COMPLETED,
+            ]
+        else:
+            # EXISTING_COMPLETE or EXISTING_ENHANCE
+            stage_order = [
+                Stage.INPUT,
+                Stage.PROJECT_ANALYSIS,
+                Stage.ENRICHMENT,
+                Stage.EVALUATION,
+                Stage.HUMAN_REVIEW,
+                Stage.SCAFFOLDING,
+                Stage.HUMAN_REVIEW,  # Second HIL gate
+                Stage.BUILDING,
+                Stage.COMPLETED,
+            ]
 
         try:
             idx = stage_order.index(current_stage)

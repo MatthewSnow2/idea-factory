@@ -8,6 +8,8 @@ from ..core.models import (
     IdeaListResponse,
     IdeaResponse,
     PipelineStatusResponse,
+    ProjectAnalysisResult,
+    ProjectMode,
     Stage,
     Status,
 )
@@ -23,6 +25,17 @@ async def create_idea(input_data: IdeaInput) -> Idea:
 
     The idea starts in INPUT stage with PENDING status.
     Use POST /ideas/{id}/start to begin the pipeline.
+
+    Modes:
+        - NEW: Generate a brand new project (default)
+        - EXISTING_COMPLETE: Analyze and complete an existing project
+        - EXISTING_ENHANCE: Analyze and add features to an existing project
+
+    For EXISTING modes, project_source is required with:
+        - source_type: "local_path" or "git_url"
+        - location: Path or URL to the project
+        - branch: Optional git branch (for git_url)
+        - subdirectory: Optional subdirectory within the project
     """
     idea = await repository.create_idea(input_data)
     return idea
@@ -57,6 +70,27 @@ async def get_idea(idea_id: str) -> IdeaResponse:
         evaluation=evaluation,
         reviews=reviews,
     )
+
+
+@router.get("/{idea_id}/analysis", response_model=ProjectAnalysisResult | None)
+async def get_project_analysis(idea_id: str) -> ProjectAnalysisResult | None:
+    """Get project analysis results for an existing project idea.
+
+    Only available for ideas with mode EXISTING_COMPLETE or EXISTING_ENHANCE.
+    Returns None if analysis hasn't been run yet.
+    """
+    idea = await repository.get_idea(idea_id)
+    if not idea:
+        raise HTTPException(status_code=404, detail=f"Idea not found: {idea_id}")
+
+    if idea.mode == ProjectMode.NEW:
+        raise HTTPException(
+            status_code=400,
+            detail="Project analysis not available for NEW mode ideas",
+        )
+
+    analysis = await repository.get_project_analysis(idea_id)
+    return analysis
 
 
 @router.get("/{idea_id}/status", response_model=PipelineStatusResponse)

@@ -12,18 +12,29 @@ from uuid import uuid4
 import aiosqlite
 
 from ..core.models import (
+    ArchitecturePattern,
     BuildOutput,
     BuildResult,
+    CompletionGap,
+    EnhancementOpportunity,
     EnrichmentOutput,
     EnrichmentResult,
     EvaluationOutput,
     EvaluationResult,
+    FileAnalysis,
+    FileModification,
     HumanReview,
     Idea,
     IdeaInput,
+    NewFileSpec,
+    ProjectAnalysisOutput,
+    ProjectAnalysisResult,
+    ProjectMode,
+    ProjectSource,
     ReviewDecision,
     ScaffoldingOutput,
     ScaffoldingResult,
+    SourceType,
     Stage,
     StateTransition,
     Status,
@@ -73,10 +84,15 @@ class Repository:
         idea_id = str(uuid4())
         now = datetime.utcnow().isoformat()
 
+        # Serialize project_source if present
+        project_source_json = None
+        if input_data.project_source:
+            project_source_json = json.dumps(input_data.project_source.model_dump())
+
         await self.db.execute(
             """
-            INSERT INTO ideas (id, title, raw_content, tags, current_stage, current_status, submitted_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO ideas (id, title, raw_content, tags, current_stage, current_status, submitted_at, updated_at, mode, project_source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 idea_id,
@@ -87,6 +103,8 @@ class Repository:
                 Status.PENDING.value,
                 now,
                 now,
+                input_data.mode.value,
+                project_source_json,
             ),
         )
         await self.db.commit()
@@ -100,6 +118,8 @@ class Repository:
             current_status=Status.PENDING,
             submitted_at=datetime.fromisoformat(now),
             updated_at=datetime.fromisoformat(now),
+            mode=input_data.mode,
+            project_source=input_data.project_source,
         )
 
     async def get_idea(self, idea_id: str) -> Idea | None:
@@ -177,6 +197,17 @@ class Repository:
 
     def _row_to_idea(self, row: aiosqlite.Row) -> Idea:
         """Convert database row to Idea model."""
+        # Parse project_source if present
+        project_source = None
+        if row["project_source"]:
+            source_data = json.loads(row["project_source"])
+            project_source = ProjectSource(
+                source_type=SourceType(source_data["source_type"]),
+                location=source_data["location"],
+                branch=source_data.get("branch"),
+                subdirectory=source_data.get("subdirectory"),
+            )
+
         return Idea(
             id=row["id"],
             title=row["title"],
@@ -186,6 +217,8 @@ class Repository:
             current_status=Status(row["current_status"]),
             submitted_at=datetime.fromisoformat(row["submitted_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+            mode=ProjectMode(row["mode"]) if row["mode"] else ProjectMode.NEW,
+            project_source=project_source,
         )
 
     # =========================================================================
@@ -243,6 +276,106 @@ class Repository:
                 market_context=row["market_context"],
                 enriched_at=datetime.fromisoformat(row["enriched_at"]),
                 enriched_by=row["enriched_by"],
+            )
+
+    # =========================================================================
+    # Project Analysis Results (for existing projects)
+    # =========================================================================
+
+    async def save_project_analysis(
+        self, idea_id: str, output: ProjectAnalysisOutput
+    ) -> ProjectAnalysisResult:
+        """Save project analysis result."""
+        now = datetime.utcnow().isoformat()
+
+        await self.db.execute(
+            """
+            INSERT OR REPLACE INTO project_analysis_results
+            (idea_id, project_name, detected_tech_stack, detected_patterns, total_files,
+             key_files, entry_points, completion_gaps, completeness_score,
+             enhancement_opportunities, architecture_quality_score, readme_summary,
+             existing_blueprint, constraints, analyzed_at, analyzed_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                idea_id,
+                output.project_name,
+                json.dumps(output.detected_tech_stack),
+                json.dumps([p.model_dump() for p in output.detected_patterns]),
+                output.total_files,
+                json.dumps([f.model_dump() for f in output.key_files]),
+                json.dumps(output.entry_points),
+                json.dumps([g.model_dump() for g in output.completion_gaps]),
+                output.completeness_score,
+                json.dumps([o.model_dump() for o in output.enhancement_opportunities]),
+                output.architecture_quality_score,
+                output.readme_summary,
+                output.existing_blueprint,
+                json.dumps(output.constraints),
+                now,
+                "claude-sonnet-4",
+            ),
+        )
+        await self.db.commit()
+
+        return ProjectAnalysisResult(
+            idea_id=idea_id,
+            project_name=output.project_name,
+            detected_tech_stack=output.detected_tech_stack,
+            detected_patterns=output.detected_patterns,
+            total_files=output.total_files,
+            key_files=output.key_files,
+            entry_points=output.entry_points,
+            completion_gaps=output.completion_gaps,
+            completeness_score=output.completeness_score,
+            enhancement_opportunities=output.enhancement_opportunities,
+            architecture_quality_score=output.architecture_quality_score,
+            readme_summary=output.readme_summary,
+            existing_blueprint=output.existing_blueprint,
+            constraints=output.constraints,
+            analyzed_at=datetime.fromisoformat(now),
+            analyzed_by="claude-sonnet-4",
+        )
+
+    async def get_project_analysis(self, idea_id: str) -> ProjectAnalysisResult | None:
+        """Get project analysis result for an idea."""
+        async with self.db.execute(
+            "SELECT * FROM project_analysis_results WHERE idea_id = ?", (idea_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+
+            # Parse JSON fields back to models
+            patterns_data = json.loads(row["detected_patterns"])
+            patterns = [ArchitecturePattern(**p) for p in patterns_data]
+
+            key_files_data = json.loads(row["key_files"])
+            key_files = [FileAnalysis(**f) for f in key_files_data]
+
+            gaps_data = json.loads(row["completion_gaps"]) if row["completion_gaps"] else []
+            gaps = [CompletionGap(**g) for g in gaps_data]
+
+            opps_data = json.loads(row["enhancement_opportunities"]) if row["enhancement_opportunities"] else []
+            opportunities = [EnhancementOpportunity(**o) for o in opps_data]
+
+            return ProjectAnalysisResult(
+                idea_id=row["idea_id"],
+                project_name=row["project_name"],
+                detected_tech_stack=json.loads(row["detected_tech_stack"]),
+                detected_patterns=patterns,
+                total_files=row["total_files"],
+                key_files=key_files,
+                entry_points=json.loads(row["entry_points"]),
+                completion_gaps=gaps,
+                completeness_score=row["completeness_score"],
+                enhancement_opportunities=opportunities,
+                architecture_quality_score=row["architecture_quality_score"],
+                readme_summary=row["readme_summary"],
+                existing_blueprint=row["existing_blueprint"],
+                constraints=json.loads(row["constraints"]),
+                analyzed_at=datetime.fromisoformat(row["analyzed_at"]),
+                analyzed_by=row["analyzed_by"],
             )
 
     # =========================================================================
@@ -380,11 +513,17 @@ class Repository:
         """Save scaffolding result."""
         now = datetime.utcnow().isoformat()
 
+        # Serialize existing project fields if present
+        file_mods_json = json.dumps([m.model_dump() for m in output.file_modifications]) if output.file_modifications else None
+        new_files_json = json.dumps([f.model_dump() for f in output.new_files]) if output.new_files else None
+        preserved_json = json.dumps(output.preserved_files) if output.preserved_files else None
+
         await self.db.execute(
             """
             INSERT OR REPLACE INTO scaffolding_results
-            (idea_id, blueprint_content, project_structure, tech_stack, estimated_hours, scaffolded_at, scaffolded_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (idea_id, blueprint_content, project_structure, tech_stack, estimated_hours,
+             scaffolded_at, scaffolded_by, file_modifications, new_files, preserved_files)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 idea_id,
@@ -394,6 +533,9 @@ class Repository:
                 output.estimated_hours,
                 now,
                 "claude-sonnet-4",
+                file_mods_json,
+                new_files_json,
+                preserved_json,
             ),
         )
         await self.db.commit()
@@ -406,6 +548,9 @@ class Repository:
             estimated_hours=output.estimated_hours,
             scaffolded_at=datetime.fromisoformat(now),
             scaffolded_by="claude-sonnet-4",
+            file_modifications=output.file_modifications,
+            new_files=output.new_files,
+            preserved_files=output.preserved_files,
         )
 
     async def get_scaffolding(self, idea_id: str) -> ScaffoldingResult | None:
@@ -416,6 +561,22 @@ class Repository:
             row = await cursor.fetchone()
             if not row:
                 return None
+
+            # Parse existing project fields if present
+            file_modifications = []
+            if row["file_modifications"]:
+                mods_data = json.loads(row["file_modifications"])
+                file_modifications = [FileModification(**m) for m in mods_data]
+
+            new_files = []
+            if row["new_files"]:
+                files_data = json.loads(row["new_files"])
+                new_files = [NewFileSpec(**f) for f in files_data]
+
+            preserved_files = []
+            if row["preserved_files"]:
+                preserved_files = json.loads(row["preserved_files"])
+
             return ScaffoldingResult(
                 idea_id=row["idea_id"],
                 blueprint_content=row["blueprint_content"],
@@ -424,6 +585,9 @@ class Repository:
                 estimated_hours=row["estimated_hours"],
                 scaffolded_at=datetime.fromisoformat(row["scaffolded_at"]),
                 scaffolded_by=row["scaffolded_by"],
+                file_modifications=file_modifications,
+                new_files=new_files,
+                preserved_files=preserved_files,
             )
 
     # =========================================================================

@@ -11,7 +11,7 @@ import os
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-from ..core.models import EnrichmentOutput, Idea
+from ..core.models import EnrichmentOutput, Idea, ProjectAnalysisResult, ProjectMode
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -53,12 +53,97 @@ Be specific and analytical. Focus on:
 Return ONLY valid JSON, no markdown code blocks or explanation.
 """
 
+EXISTING_PROJECT_ENRICHMENT_PROMPT = """You are an expert product analyst and innovation strategist.
+Analyze this enhancement/completion idea for an EXISTING project.
 
-async def enrich_idea(idea: Idea) -> EnrichmentOutput:
+IDEA TITLE: {title}
+
+IDEA DESCRIPTION (User's Goals):
+{raw_content}
+
+TAGS: {tags}
+
+EXISTING PROJECT CONTEXT:
+- Project Name: {project_name}
+- Tech Stack: {tech_stack}
+- Architecture Patterns: {patterns}
+- Detected Entry Points: {entry_points}
+
+{mode_specific_context}
+
+README Summary:
+{readme_summary}
+
+Your task is to enhance this idea with context-aware analysis. Provide a JSON response with this exact structure:
+
+{{
+  "enhanced_title": "<improved title that references the existing project>",
+  "enhanced_description": "<2-3 paragraph description of what this enhancement/completion entails, referencing existing architecture>",
+  "problem_statement": "<clear articulation of the problem this solves, in context of the existing project>",
+  "potential_solutions": [
+    "<approach 1 that integrates with existing patterns>",
+    "<approach 2 that builds on existing architecture>",
+    "<approach 3 alternative approach>"
+  ],
+  "market_context": "<value this enhancement adds to the project, competitive positioning>"
+}}
+
+Be specific and reference the existing project context. Focus on:
+1. How this enhancement fits into the existing architecture
+2. What existing patterns to follow
+3. Integration points with current code
+4. Maintaining consistency with the project's style
+
+Return ONLY valid JSON, no markdown code blocks or explanation.
+"""
+
+
+def _build_existing_project_prompt(
+    idea: Idea, analysis: ProjectAnalysisResult
+) -> str:
+    """Build enrichment prompt for existing projects."""
+    # Format patterns
+    patterns = ", ".join(p.pattern_name for p in analysis.detected_patterns) or "None detected"
+
+    # Build mode-specific context
+    if idea.mode == ProjectMode.EXISTING_COMPLETE:
+        gaps_list = "\n".join(
+            f"  - [{g.priority}] {g.description} (in {g.location})"
+            for g in analysis.completion_gaps[:5]
+        )
+        mode_context = f"""COMPLETION GAPS (what needs to be finished):
+{gaps_list}
+Completeness Score: {analysis.completeness_score or 'N/A'}"""
+    else:  # EXISTING_ENHANCE
+        opps_list = "\n".join(
+            f"  - [{o.opportunity_type}] {o.description}"
+            for o in analysis.enhancement_opportunities[:5]
+        )
+        mode_context = f"""ENHANCEMENT OPPORTUNITIES:
+{opps_list}
+Architecture Quality Score: {analysis.architecture_quality_score or 'N/A'}"""
+
+    return EXISTING_PROJECT_ENRICHMENT_PROMPT.format(
+        title=idea.title,
+        raw_content=idea.raw_content,
+        tags=", ".join(idea.tags) if idea.tags else "None",
+        project_name=analysis.project_name,
+        tech_stack=", ".join(analysis.detected_tech_stack) or "None detected",
+        patterns=patterns,
+        entry_points=", ".join(analysis.entry_points) or "None detected",
+        mode_specific_context=mode_context,
+        readme_summary=analysis.readme_summary or "No README found",
+    )
+
+
+async def enrich_idea(
+    idea: Idea, analysis: ProjectAnalysisResult | None = None
+) -> EnrichmentOutput:
     """Run enrichment stage on an idea.
 
     Args:
         idea: The idea to enrich
+        analysis: Optional project analysis result (for existing projects)
 
     Returns:
         EnrichmentOutput with enhanced analysis
@@ -70,11 +155,17 @@ async def enrich_idea(idea: Idea) -> EnrichmentOutput:
 
     model = genai.GenerativeModel("gemini-2.0-flash")
 
-    prompt = ENRICHMENT_PROMPT.format(
-        title=idea.title,
-        raw_content=idea.raw_content,
-        tags=", ".join(idea.tags) if idea.tags else "None",
-    )
+    # Build prompt based on mode
+    if analysis and idea.mode != ProjectMode.NEW:
+        # Existing project: use context-aware prompt
+        prompt = _build_existing_project_prompt(idea, analysis)
+    else:
+        # New project: use standard prompt
+        prompt = ENRICHMENT_PROMPT.format(
+            title=idea.title,
+            raw_content=idea.raw_content,
+            tags=", ".join(idea.tags) if idea.tags else "None",
+        )
 
     try:
         response = await model.generate_content_async(prompt)

@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS ideas (
     current_stage TEXT NOT NULL DEFAULT 'input',
     current_status TEXT NOT NULL DEFAULT 'pending',
     submitted_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'new',  -- 'new', 'existing_complete', 'existing_enhance'
+    project_source TEXT  -- JSON object with source_type, location, branch, subdirectory
 );
 
 -- Enrichment results (Gemini analysis)
@@ -25,6 +27,27 @@ CREATE TABLE IF NOT EXISTS enrichment_results (
     market_context TEXT NOT NULL,
     enriched_at TEXT NOT NULL,
     enriched_by TEXT NOT NULL DEFAULT 'gemini-1.5-flash',
+    FOREIGN KEY (idea_id) REFERENCES ideas(id) ON DELETE CASCADE
+);
+
+-- Project analysis results (for existing projects)
+CREATE TABLE IF NOT EXISTS project_analysis_results (
+    idea_id TEXT PRIMARY KEY,
+    project_name TEXT NOT NULL,
+    detected_tech_stack TEXT NOT NULL,  -- JSON array
+    detected_patterns TEXT NOT NULL,     -- JSON array of ArchitecturePattern
+    total_files INTEGER NOT NULL,
+    key_files TEXT NOT NULL,             -- JSON array of FileAnalysis
+    entry_points TEXT NOT NULL,          -- JSON array
+    completion_gaps TEXT,                -- JSON array of CompletionGap
+    completeness_score REAL,
+    enhancement_opportunities TEXT,      -- JSON array of EnhancementOpportunity
+    architecture_quality_score REAL,
+    readme_summary TEXT,
+    existing_blueprint TEXT,
+    constraints TEXT NOT NULL DEFAULT '[]',  -- JSON array
+    analyzed_at TEXT NOT NULL,
+    analyzed_by TEXT NOT NULL DEFAULT 'claude-3-5-sonnet',
     FOREIGN KEY (idea_id) REFERENCES ideas(id) ON DELETE CASCADE
 );
 
@@ -66,6 +89,10 @@ CREATE TABLE IF NOT EXISTS scaffolding_results (
     estimated_hours REAL,
     scaffolded_at TEXT NOT NULL,
     scaffolded_by TEXT NOT NULL DEFAULT 'claude-3-5-sonnet',
+    -- For existing projects
+    file_modifications TEXT,          -- JSON array of FileModification
+    new_files TEXT,                   -- JSON array of NewFileSpec
+    preserved_files TEXT,             -- JSON array of paths
     FOREIGN KEY (idea_id) REFERENCES ideas(id) ON DELETE CASCADE
 );
 

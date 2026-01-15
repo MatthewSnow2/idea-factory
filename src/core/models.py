@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # =============================================================================
@@ -19,6 +19,7 @@ class Stage(str, Enum):
     """Pipeline stages."""
 
     INPUT = "input"
+    PROJECT_ANALYSIS = "project_analysis"  # NEW: For existing projects
     ENRICHMENT = "enrichment"
     EVALUATION = "evaluation"
     HUMAN_REVIEW = "human_review"
@@ -26,6 +27,21 @@ class Stage(str, Enum):
     BUILDING = "building"
     COMPLETED = "completed"
     ARCHIVED = "archived"
+
+
+class ProjectMode(str, Enum):
+    """Project processing mode."""
+
+    NEW = "new"  # Create new project from scratch
+    EXISTING_COMPLETE = "existing_complete"  # Analyze and complete existing project
+    EXISTING_ENHANCE = "existing_enhance"  # Analyze and add features to existing project
+
+
+class SourceType(str, Enum):
+    """Source type for existing projects."""
+
+    LOCAL_PATH = "local_path"  # Local filesystem path
+    GIT_URL = "git_url"  # Remote git repository URL
 
 
 class Status(str, Enum):
@@ -70,12 +86,30 @@ class ReviewDecision(str, Enum):
 # =============================================================================
 
 
+class ProjectSource(BaseModel):
+    """Source configuration for existing projects."""
+
+    source_type: SourceType
+    location: str  # Path or URL
+    branch: str | None = None  # For git URLs
+    subdirectory: str | None = None  # If project is in a subdirectory
+
+
 class IdeaInput(BaseModel):
     """Input for creating a new idea."""
 
     title: str = Field(..., min_length=3, max_length=200)
     raw_content: str = Field(..., min_length=10)
     tags: list[str] = Field(default_factory=list)
+    mode: ProjectMode = ProjectMode.NEW
+    project_source: ProjectSource | None = None
+
+    @model_validator(mode="after")
+    def validate_source_for_existing(self) -> "IdeaInput":
+        """Require project_source for EXISTING modes."""
+        if self.mode != ProjectMode.NEW and not self.project_source:
+            raise ValueError(f"project_source required for mode {self.mode}")
+        return self
 
 
 class HumanReviewInput(BaseModel):
@@ -120,6 +154,24 @@ class EvaluationOutput(BaseModel):
     case_study_matches: list[str]
 
 
+class FileModification(BaseModel):
+    """A modification to an existing file (for existing projects)."""
+
+    file_path: str
+    modification_type: Literal["patch", "replace", "append", "insert"]
+    content: str  # Patch diff or new content
+    line_start: int | None = None  # For insert/append
+    rationale: str
+
+
+class NewFileSpec(BaseModel):
+    """Specification for a new file to create (for existing projects)."""
+
+    file_path: str
+    purpose: str
+    integrates_with: list[str] = Field(default_factory=list)  # Existing files
+
+
 class ScaffoldingOutput(BaseModel):
     """Output from scaffolding stage (Claude)."""
 
@@ -127,6 +179,10 @@ class ScaffoldingOutput(BaseModel):
     project_structure: dict[str, list[str]]  # directory -> files
     tech_stack: list[str]
     estimated_hours: float | None = None
+    # For existing projects
+    file_modifications: list[FileModification] = Field(default_factory=list)
+    new_files: list[NewFileSpec] = Field(default_factory=list)
+    preserved_files: list[str] = Field(default_factory=list)
 
 
 class BuildOutput(BaseModel):
@@ -135,6 +191,80 @@ class BuildOutput(BaseModel):
     github_repo: str | None = None
     artifacts: list[str] = Field(default_factory=list)
     outcome: Literal["success", "partial", "failed"]
+
+
+# =============================================================================
+# Project Analysis Models (for existing projects)
+# =============================================================================
+
+
+class FileAnalysis(BaseModel):
+    """Analysis of a single file."""
+
+    path: str
+    language: str
+    purpose: str  # Brief description of what this file does
+    dependencies: list[str] = Field(default_factory=list)  # What it imports/requires
+    exports: list[str] = Field(default_factory=list)  # What it exports/provides
+    issues: list[str] = Field(default_factory=list)  # Problems detected
+    todos: list[str] = Field(default_factory=list)  # TODO comments found
+
+
+class ArchitecturePattern(BaseModel):
+    """Detected architecture pattern."""
+
+    pattern_name: str  # e.g., "MVC", "Clean Architecture", "Microservices"
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    evidence: list[str] = Field(default_factory=list)  # Files/patterns that support this
+
+
+class CompletionGap(BaseModel):
+    """A gap identified for COMPLETE mode."""
+
+    gap_type: Literal[
+        "missing_feature", "incomplete_implementation", "broken_test", "todo"
+    ]
+    description: str
+    location: str  # File path or general area
+    priority: Literal["high", "medium", "low"]
+    estimated_effort: Literal["small", "medium", "large"]
+
+
+class EnhancementOpportunity(BaseModel):
+    """An enhancement opportunity for ENHANCE mode."""
+
+    opportunity_type: Literal["new_feature", "refactoring", "performance", "testing"]
+    description: str
+    affected_areas: list[str] = Field(default_factory=list)
+    integration_points: list[str] = Field(default_factory=list)
+    estimated_effort: Literal["small", "medium", "large"]
+
+
+class ProjectAnalysisOutput(BaseModel):
+    """Output from project analysis stage."""
+
+    # Basic project info
+    project_name: str
+    detected_tech_stack: list[str]
+    detected_patterns: list[ArchitecturePattern] = Field(default_factory=list)
+
+    # File structure analysis
+    total_files: int
+    key_files: list[FileAnalysis] = Field(default_factory=list)
+    entry_points: list[str] = Field(default_factory=list)
+
+    # For COMPLETE mode
+    completion_gaps: list[CompletionGap] = Field(default_factory=list)
+    completeness_score: float | None = None  # 0.0 to 1.0
+
+    # For ENHANCE mode
+    enhancement_opportunities: list[EnhancementOpportunity] = Field(default_factory=list)
+    architecture_quality_score: float | None = None  # 0.0 to 1.0
+
+    # Common
+    readme_summary: str | None = None
+    existing_blueprint: str | None = None  # If BLUEPRINT.md exists
+    constraints: list[str] = Field(default_factory=list)  # e.g., "n8n-constrained"
 
 
 # =============================================================================
@@ -153,6 +283,8 @@ class Idea(BaseModel):
     current_status: Status
     submitted_at: datetime
     updated_at: datetime
+    mode: ProjectMode = ProjectMode.NEW
+    project_source: ProjectSource | None = None
 
 
 class EnrichmentResult(BaseModel):
@@ -166,6 +298,27 @@ class EnrichmentResult(BaseModel):
     market_context: str
     enriched_at: datetime
     enriched_by: str
+
+
+class ProjectAnalysisResult(BaseModel):
+    """Project analysis result record (for existing projects)."""
+
+    idea_id: str
+    project_name: str
+    detected_tech_stack: list[str]
+    detected_patterns: list[ArchitecturePattern]
+    total_files: int
+    key_files: list[FileAnalysis]
+    entry_points: list[str]
+    completion_gaps: list[CompletionGap] = Field(default_factory=list)
+    completeness_score: float | None = None
+    enhancement_opportunities: list[EnhancementOpportunity] = Field(default_factory=list)
+    architecture_quality_score: float | None = None
+    readme_summary: str | None = None
+    existing_blueprint: str | None = None
+    constraints: list[str] = Field(default_factory=list)
+    analyzed_at: datetime
+    analyzed_by: str
 
 
 class EvaluationResult(BaseModel):
@@ -207,6 +360,10 @@ class ScaffoldingResult(BaseModel):
     estimated_hours: float | None
     scaffolded_at: datetime
     scaffolded_by: str
+    # For existing projects
+    file_modifications: list[FileModification] = Field(default_factory=list)
+    new_files: list[NewFileSpec] = Field(default_factory=list)
+    preserved_files: list[str] = Field(default_factory=list)
 
 
 class BuildResult(BaseModel):

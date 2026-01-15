@@ -13,6 +13,8 @@ from ..core.models import (
     EnrichmentResult,
     EvaluationResult,
     Idea,
+    ProjectAnalysisResult,
+    ProjectMode,
     ReviewDecision,
     ScaffoldingResult,
     Stage,
@@ -24,6 +26,7 @@ from ..notifications.service import NotificationContext, NotificationService, ge
 from .building import build_project
 from .enrichment import enrich_idea
 from .evaluation import evaluate_idea
+from .project_analysis import analyze_project
 from .scaffolding import scaffold_idea
 
 logger = logging.getLogger(__name__)
@@ -113,7 +116,8 @@ class PipelineOrchestrator:
     async def start_pipeline(self, idea_id: str) -> PipelineResult:
         """Start the pipeline for an idea.
 
-        Transitions from INPUT to ENRICHMENT and begins processing.
+        For NEW mode: Transitions from INPUT to ENRICHMENT.
+        For EXISTING modes: Transitions from INPUT to PROJECT_ANALYSIS.
         """
         idea = await self.repo.get_idea(idea_id)
         if not idea:
@@ -126,9 +130,16 @@ class PipelineOrchestrator:
                 message=f"Idea not in INPUT stage: {idea.current_stage.value}",
             )
 
-        # Transition to enrichment
+        # Determine target stage based on mode
+        if idea.mode == ProjectMode.NEW:
+            target_stage = Stage.ENRICHMENT
+        else:
+            # EXISTING_COMPLETE or EXISTING_ENHANCE
+            target_stage = Stage.PROJECT_ANALYSIS
+
+        # Transition to target stage
         result = self.state_machine.transition(
-            idea.current_stage, idea.current_status, Stage.ENRICHMENT, Status.PROCESSING
+            idea.current_stage, idea.current_status, target_stage, Status.PROCESSING
         )
 
         if not result.success:
@@ -136,19 +147,29 @@ class PipelineOrchestrator:
 
         # Update state
         idea = await self.repo.update_idea_state(
-            idea_id, Stage.ENRICHMENT, Status.PROCESSING, triggered_by="pipeline"
+            idea_id, target_stage, Status.PROCESSING, triggered_by="pipeline"
         )
 
-        # Run enrichment
-        return await self._run_enrichment(idea)
+        # Run appropriate stage
+        if target_stage == Stage.PROJECT_ANALYSIS:
+            return await self._run_project_analysis(idea)
+        else:
+            return await self._run_enrichment(idea)
 
-    async def _run_enrichment(self, idea: Idea) -> PipelineResult:
-        """Run the enrichment stage."""
+    async def _run_enrichment(
+        self, idea: Idea, analysis: ProjectAnalysisResult | None = None
+    ) -> PipelineResult:
+        """Run the enrichment stage.
+
+        Args:
+            idea: The idea to enrich
+            analysis: Optional project analysis result (for existing projects)
+        """
         logger.info(f"Running enrichment for idea: {idea.id}")
 
         try:
-            # Execute enrichment
-            output = await enrich_idea(idea)
+            # Execute enrichment (with optional analysis context)
+            output = await enrich_idea(idea, analysis)
 
             # Save result
             await self.repo.save_enrichment(idea.id, output)
@@ -183,6 +204,73 @@ class PipelineOrchestrator:
                 message=f"Enrichment failed: {e}",
             )
 
+    async def _start_enrichment_with_analysis(self, idea: Idea) -> PipelineResult:
+        """Start enrichment stage after project analysis (for existing projects)."""
+        # Get analysis result
+        analysis = await self.repo.get_project_analysis(idea.id)
+        if not analysis:
+            return PipelineResult(
+                success=False,
+                idea=idea,
+                message="Cannot enrich: no project analysis result found",
+            )
+
+        # Transition to enrichment processing
+        result = self.state_machine.transition(
+            idea.current_stage, idea.current_status, Stage.ENRICHMENT, Status.PROCESSING
+        )
+
+        if not result.success:
+            return PipelineResult(success=False, idea=idea, message=result.error)
+
+        idea = await self.repo.update_idea_state(
+            idea.id, Stage.ENRICHMENT, Status.PROCESSING, triggered_by="pipeline"
+        )
+
+        # Run enrichment with analysis context
+        return await self._run_enrichment(idea, analysis)
+
+    async def _run_project_analysis(self, idea: Idea) -> PipelineResult:
+        """Run the project analysis stage (for existing projects)."""
+        logger.info(f"Running project analysis for idea: {idea.id}")
+
+        try:
+            # Execute project analysis
+            output = await analyze_project(idea)
+
+            # Save result
+            await self.repo.save_project_analysis(idea.id, output)
+
+            # Transition to completed
+            idea = await self.repo.update_idea_state(
+                idea.id, Stage.PROJECT_ANALYSIS, Status.COMPLETED, triggered_by="pipeline"
+            )
+
+            logger.info(f"Project analysis completed for idea: {idea.id}")
+            return PipelineResult(
+                success=True,
+                idea=idea,
+                stage=Stage.PROJECT_ANALYSIS,
+                status=Status.COMPLETED,
+                message=f"Project analysis completed. Found {output.total_files} files. Ready for enrichment.",
+            )
+
+        except Exception as e:
+            logger.error(f"Project analysis failed for idea {idea.id}: {e}")
+
+            # Transition to failed
+            await self.repo.update_idea_state(
+                idea.id, Stage.PROJECT_ANALYSIS, Status.FAILED, triggered_by="pipeline"
+            )
+
+            return PipelineResult(
+                success=False,
+                idea=idea,
+                stage=Stage.PROJECT_ANALYSIS,
+                status=Status.FAILED,
+                message=f"Project analysis failed: {e}",
+            )
+
     async def continue_pipeline(self, idea_id: str) -> PipelineResult:
         """Continue the pipeline to the next stage.
 
@@ -193,7 +281,14 @@ class PipelineOrchestrator:
             return PipelineResult(success=False, message=f"Idea not found: {idea_id}")
 
         # Check current state and advance
-        if idea.current_stage == Stage.ENRICHMENT and idea.current_status == Status.COMPLETED:
+        if (
+            idea.current_stage == Stage.PROJECT_ANALYSIS
+            and idea.current_status == Status.COMPLETED
+        ):
+            # After project analysis, start enrichment with analysis context
+            return await self._start_enrichment_with_analysis(idea)
+
+        elif idea.current_stage == Stage.ENRICHMENT and idea.current_status == Status.COMPLETED:
             return await self._start_evaluation(idea)
 
         elif idea.current_stage == Stage.EVALUATION and idea.current_status == Status.COMPLETED:
@@ -420,6 +515,11 @@ class PipelineOrchestrator:
                 message="Cannot scaffold: missing enrichment or evaluation results",
             )
 
+        # Get analysis for existing projects
+        analysis = None
+        if idea.mode != ProjectMode.NEW:
+            analysis = await self.repo.get_project_analysis(idea.id)
+
         # Transition to scaffolding processing
         result = self.state_machine.transition(
             idea.current_stage, idea.current_status, Stage.SCAFFOLDING, Status.PROCESSING
@@ -432,20 +532,28 @@ class PipelineOrchestrator:
             idea.id, Stage.SCAFFOLDING, Status.PROCESSING, triggered_by="pipeline"
         )
 
-        return await self._run_scaffolding(idea, enrichment, evaluation)
+        return await self._run_scaffolding(idea, enrichment, evaluation, analysis)
 
     async def _run_scaffolding(
         self,
         idea: Idea,
         enrichment: EnrichmentResult,
         evaluation: EvaluationResult,
+        analysis: ProjectAnalysisResult | None = None,
     ) -> PipelineResult:
-        """Run the scaffolding stage."""
+        """Run the scaffolding stage.
+
+        Args:
+            idea: The idea to scaffold
+            enrichment: Enrichment result
+            evaluation: Evaluation result
+            analysis: Optional project analysis result (for existing projects)
+        """
         logger.info(f"Running scaffolding for idea: {idea.id}")
 
         try:
-            # Execute scaffolding
-            output = await scaffold_idea(idea, enrichment, evaluation)
+            # Execute scaffolding (with optional analysis context)
+            output = await scaffold_idea(idea, enrichment, evaluation, analysis)
 
             # Save result
             await self.repo.save_scaffolding(idea.id, output)
@@ -518,8 +626,8 @@ class PipelineOrchestrator:
         started_at = datetime.utcnow()
 
         try:
-            # Execute building
-            output = await build_project(idea.id, enrichment, scaffolding)
+            # Execute building (pass idea for mode detection)
+            output = await build_project(idea.id, enrichment, scaffolding, idea)
 
             # Save result
             await self.repo.save_build(idea.id, output, started_at)
