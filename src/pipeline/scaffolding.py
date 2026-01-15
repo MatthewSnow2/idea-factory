@@ -10,6 +10,7 @@ file modifications and new file specifications.
 import json
 import logging
 import os
+from pathlib import Path
 
 import anthropic
 from dotenv import load_dotenv
@@ -25,6 +26,10 @@ from ..core.models import (
     ScaffoldingOutput,
 )
 
+# Load shared env first, then local can override
+shared_env = Path.home() / ".env.shared"
+if shared_env.exists():
+    load_dotenv(shared_env)
 load_dotenv()
 logger = logging.getLogger(__name__)
 

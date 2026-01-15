@@ -7,12 +7,17 @@ problem statement, and market context.
 import json
 import logging
 import os
+from pathlib import Path
 
 import google.generativeai as genai
 from dotenv import load_dotenv
 
 from ..core.models import EnrichmentOutput, Idea, ProjectAnalysisResult, ProjectMode
 
+# Load shared env first, then local can override
+shared_env = Path.home() / ".env.shared"
+if shared_env.exists():
+    load_dotenv(shared_env)
 load_dotenv()
 logger = logging.getLogger(__name__)
 

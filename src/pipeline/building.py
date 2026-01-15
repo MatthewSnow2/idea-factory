@@ -25,6 +25,10 @@ from ..core.models import (
     ScaffoldingResult,
 )
 
+# Load shared env first, then local can override
+shared_env = Path.home() / ".env.shared"
+if shared_env.exists():
+    load_dotenv(shared_env)
 load_dotenv()
 logger = logging.getLogger(__name__)
 
