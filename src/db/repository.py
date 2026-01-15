@@ -89,10 +89,15 @@ class Repository:
         if input_data.project_source:
             project_source_json = json.dumps(input_data.project_source.model_dump())
 
+        # Serialize preferred_tech_stack if present
+        preferred_tech_stack_json = None
+        if input_data.preferred_tech_stack:
+            preferred_tech_stack_json = json.dumps(input_data.preferred_tech_stack)
+
         await self.db.execute(
             """
-            INSERT INTO ideas (id, title, raw_content, tags, current_stage, current_status, submitted_at, updated_at, mode, project_source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO ideas (id, title, raw_content, tags, current_stage, current_status, submitted_at, updated_at, mode, project_source, preferred_tech_stack)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 idea_id,
@@ -105,6 +110,7 @@ class Repository:
                 now,
                 input_data.mode.value,
                 project_source_json,
+                preferred_tech_stack_json,
             ),
         )
         await self.db.commit()
@@ -120,6 +126,7 @@ class Repository:
             updated_at=datetime.fromisoformat(now),
             mode=input_data.mode,
             project_source=input_data.project_source,
+            preferred_tech_stack=input_data.preferred_tech_stack,
         )
 
     async def get_idea(self, idea_id: str) -> Idea | None:
@@ -208,6 +215,11 @@ class Repository:
                 subdirectory=source_data.get("subdirectory"),
             )
 
+        # Parse preferred_tech_stack if present
+        preferred_tech_stack = None
+        if row["preferred_tech_stack"]:
+            preferred_tech_stack = json.loads(row["preferred_tech_stack"])
+
         return Idea(
             id=row["id"],
             title=row["title"],
@@ -219,6 +231,7 @@ class Repository:
             updated_at=datetime.fromisoformat(row["updated_at"]),
             mode=ProjectMode(row["mode"]) if row["mode"] else ProjectMode.NEW,
             project_source=project_source,
+            preferred_tech_stack=preferred_tech_stack,
         )
 
     # =========================================================================

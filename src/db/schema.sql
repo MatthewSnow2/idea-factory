@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS ideas (
     submitted_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     mode TEXT NOT NULL DEFAULT 'new',  -- 'new', 'existing_complete', 'existing_enhance'
-    project_source TEXT  -- JSON object with source_type, location, branch, subdirectory
+    project_source TEXT,  -- JSON object with source_type, location, branch, subdirectory
+    preferred_tech_stack TEXT  -- JSON array, user override for tech stack decision
 );
 
 -- Enrichment results (Gemini analysis)

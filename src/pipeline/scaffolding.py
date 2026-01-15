@@ -36,6 +36,37 @@ logger = logging.getLogger(__name__)
 # Initialize Anthropic client
 client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
+TECH_STACK_DECISION_PROMPT = """You are a senior software architect. Based on the project blueprint below, decide on the optimal tech stack.
+
+## BLUEPRINT:
+{blueprint}
+
+Analyze the blueprint and determine the best tech stack. Consider:
+1. Project type (CLI tool, web app, API, library, etc.)
+2. Requirements mentioned (frameworks, tools, patterns)
+3. Platform targets (cross-platform, specific OS, web)
+4. Team/ecosystem context if mentioned
+
+Return ONLY valid JSON with this exact format:
+{{
+  "primary_language": "Python",
+  "tech_stack": ["Python 3.11+", "pytest", "Poetry", "Click"],
+  "reasoning": "Brief 1-2 sentence explanation of why this stack fits the requirements"
+}}
+
+Common mappings (use these as guidance):
+- CLI tools with argparse/Click → Python
+- CLI tools with Commander/yargs → TypeScript/Node.js
+- Web APIs with FastAPI/Django → Python
+- Web APIs with Express/Fastify → TypeScript/Node.js
+- React/Next.js frontends → TypeScript
+- Data pipelines → Python
+- System utilities → Go or Rust
+- Unity games → C#
+
+Return ONLY the JSON, no markdown code blocks.
+"""
+
 BLUEPRINT_PROMPT = """You are an expert software architect. Create a project blueprint for:
 
 **{title}**
@@ -55,17 +86,35 @@ Return ONLY the markdown content, no code blocks wrapping it.
 
 STRUCTURE_PROMPT = """For a {tech_primary} project called "{title}", generate a JSON project structure.
 
-Return ONLY valid JSON with this exact format:
+DECIDED TECH STACK: {tech_stack}
+
+Return ONLY valid JSON with this exact format. Use file extensions appropriate for the tech stack:
+- Python: .py files, pyproject.toml, pytest
+- TypeScript: .ts files, package.json, tsconfig.json
+- Go: .go files, go.mod
+- Rust: .rs files, Cargo.toml
+- C#: .cs files, .csproj
+
+Example for Python:
+{{
+  "src": ["src/main.py", "src/config.py"],
+  "tests": ["tests/test_main.py"],
+  "docs": ["docs/README.md"],
+  "config": ["pyproject.toml", ".env.example"],
+  "estimated_hours": 40
+}}
+
+Example for TypeScript:
 {{
   "src": ["src/app.ts", "src/config/index.ts"],
   "tests": ["tests/app.test.ts"],
   "docs": ["docs/README.md"],
   "config": ["package.json", "tsconfig.json"],
-  "tech_stack": ["Node.js", "TypeScript"],
   "estimated_hours": 40
 }}
 
 Keep the file lists short (5-8 files per category max).
+Return ONLY the JSON, no explanation.
 """
 
 EXISTING_PROJECT_BLUEPRINT_PROMPT = """You are an expert software architect. Create an enhancement/completion blueprint for an EXISTING project.
@@ -182,18 +231,36 @@ async def _scaffold_new_project(
     # Step 1: Generate blueprint (plain markdown)
     blueprint = await _generate_blueprint(enrichment)
 
-    # Step 2: Generate structure (JSON)
-    structure_data = await _generate_structure(enrichment.enhanced_title)
+    # Step 2: Decide tech stack (Option B) or use user override (Option C fallback)
+    if idea.preferred_tech_stack:
+        # User specified tech stack - use it directly
+        tech_stack_decision = {
+            "primary_language": idea.preferred_tech_stack[0] if idea.preferred_tech_stack else "Python",
+            "tech_stack": idea.preferred_tech_stack,
+            "reasoning": "User-specified tech stack override",
+        }
+        logger.info(f"Using user-specified tech stack: {idea.preferred_tech_stack}")
+    else:
+        # AI decides based on blueprint analysis
+        tech_stack_decision = await _decide_tech_stack(blueprint)
+        logger.info(f"AI decided tech stack: {tech_stack_decision['tech_stack']} - {tech_stack_decision['reasoning']}")
+
+    # Step 3: Generate structure using the decided tech stack
+    structure_data = await _generate_structure(
+        enrichment.enhanced_title,
+        tech_stack_decision["primary_language"],
+        tech_stack_decision["tech_stack"],
+    )
 
     output = ScaffoldingOutput(
         blueprint_content=blueprint,
         project_structure=structure_data.get("project_structure", {
-            "src": ["src/index.ts"],
-            "tests": ["tests/index.test.ts"],
+            "src": ["src/main.py"],
+            "tests": ["tests/test_main.py"],
             "docs": ["docs/README.md"],
-            "config": ["package.json"],
+            "config": ["pyproject.toml"],
         }),
-        tech_stack=structure_data.get("tech_stack", ["Node.js", "TypeScript"]),
+        tech_stack=tech_stack_decision["tech_stack"],
         estimated_hours=structure_data.get("estimated_hours"),
     )
 
@@ -272,11 +339,65 @@ async def _generate_blueprint(enrichment: EnrichmentResult) -> str:
     return message.content[0].text.strip()
 
 
-async def _generate_structure(title: str) -> dict:
-    """Generate project structure as JSON."""
+async def _decide_tech_stack(blueprint: str) -> dict:
+    """Decide tech stack based on blueprint analysis.
+
+    This is the explicit tech stack decision phase (Option B).
+    Cost: ~$0.003-0.005 per call (~2-3% additional pipeline time).
+
+    Returns:
+        Dict with primary_language, tech_stack list, and reasoning.
+    """
+    prompt = TECH_STACK_DECISION_PROMPT.format(blueprint=blueprint)
+
+    message = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=256,  # Short response expected
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    response_text = message.content[0].text.strip()
+
+    # Clean up if wrapped in code blocks
+    if response_text.startswith("```"):
+        first_newline = response_text.find("\n")
+        if first_newline > 0:
+            response_text = response_text[first_newline + 1:]
+    if response_text.endswith("```"):
+        response_text = response_text[:-3]
+
+    try:
+        decision = json.loads(response_text.strip())
+        return {
+            "primary_language": decision.get("primary_language", "Python"),
+            "tech_stack": decision.get("tech_stack", ["Python"]),
+            "reasoning": decision.get("reasoning", "Default fallback"),
+        }
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse tech stack decision: {e}. Using Python fallback.")
+        return {
+            "primary_language": "Python",
+            "tech_stack": ["Python 3.11+", "pytest"],
+            "reasoning": "Fallback due to parse error",
+        }
+
+
+async def _generate_structure(
+    title: str,
+    primary_language: str,
+    tech_stack: list[str],
+) -> dict:
+    """Generate project structure as JSON.
+
+    Args:
+        title: Project title
+        primary_language: Primary language (e.g., "Python", "TypeScript")
+        tech_stack: Full tech stack list from decision phase
+    """
     prompt = STRUCTURE_PROMPT.format(
         title=title,
-        tech_primary="Node.js/TypeScript",
+        tech_primary=primary_language,
+        tech_stack=", ".join(tech_stack),
     )
 
     message = client.messages.create(
@@ -305,7 +426,6 @@ async def _generate_structure(title: str) -> dict:
             "docs": data.get("docs", []),
             "config": data.get("config", []),
         },
-        "tech_stack": data.get("tech_stack", []),
         "estimated_hours": data.get("estimated_hours"),
     }
 

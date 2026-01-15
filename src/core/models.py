@@ -103,6 +103,10 @@ class IdeaInput(BaseModel):
     tags: list[str] = Field(default_factory=list)
     mode: ProjectMode = ProjectMode.NEW
     project_source: ProjectSource | None = None
+    preferred_tech_stack: list[str] | None = Field(
+        default=None,
+        description="Optional user-specified tech stack. If provided, skips AI tech stack decision.",
+    )
 
     @model_validator(mode="after")
     def validate_source_for_existing(self) -> "IdeaInput":
@@ -285,6 +289,7 @@ class Idea(BaseModel):
     updated_at: datetime
     mode: ProjectMode = ProjectMode.NEW
     project_source: ProjectSource | None = None
+    preferred_tech_stack: list[str] | None = None
 
 
 class EnrichmentResult(BaseModel):

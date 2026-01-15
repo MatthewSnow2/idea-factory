@@ -165,7 +165,10 @@ async def _build_new_project(
 
     try:
         # Prioritize essential files to generate (limit to avoid long builds)
-        essential_files = _select_essential_files(scaffolding.project_structure)
+        essential_files = _select_essential_files(
+            scaffolding.project_structure,
+            scaffolding.tech_stack,
+        )
 
         # Generate essential files one at a time
         for category, file_path in essential_files:
@@ -326,30 +329,54 @@ async def _build_existing_project(
 
 def _select_essential_files(
     project_structure: dict[str, list[str]],
+    tech_stack: list[str],
     max_files: int = 10,
 ) -> list[tuple[str, str]]:
     """Select essential files to generate for the MVP build.
 
-    Prioritizes:
-    1. package.json and tsconfig.json (config)
-    2. Main entry point (src/app.ts, src/index.ts, etc.)
-    3. Core service files
-    4. README.md
+    Dynamically prioritizes based on tech stack:
+    - Python: pyproject.toml, main.py, __init__.py
+    - TypeScript: package.json, tsconfig.json, app.ts/index.ts
+    - Go: go.mod, main.go
+    - etc.
 
     Returns list of (category, file_path) tuples.
     """
     selected: list[tuple[str, str]] = []
 
-    # Priority config files
-    config_priority = ["package.json", "tsconfig.json", ".env.example", "Dockerfile"]
+    # Detect primary language from tech stack
+    tech_lower = " ".join(tech_stack).lower()
+    is_python = "python" in tech_lower
+    is_typescript = "typescript" in tech_lower or "node" in tech_lower
+    is_go = "go " in tech_lower or "golang" in tech_lower
+    is_rust = "rust" in tech_lower
+
+    # Priority config files based on language
+    if is_python:
+        config_priority = ["pyproject.toml", "setup.py", "requirements.txt", ".env.example", "Dockerfile"]
+    elif is_go:
+        config_priority = ["go.mod", "go.sum", ".env.example", "Dockerfile"]
+    elif is_rust:
+        config_priority = ["Cargo.toml", ".env.example", "Dockerfile"]
+    else:  # TypeScript/JavaScript default
+        config_priority = ["package.json", "tsconfig.json", ".env.example", "Dockerfile"]
+
     for cf in config_priority:
         if cf in project_structure.get("config", []):
             selected.append(("config", cf))
             if len(selected) >= max_files:
                 return selected
 
-    # Priority source files (entry points and core)
-    src_priority_patterns = ["app.ts", "index.ts", "main.ts", "server.ts"]
+    # Priority source files (entry points) based on language
+    if is_python:
+        src_priority_patterns = ["main.py", "app.py", "__main__.py", "cli.py", "__init__.py"]
+    elif is_go:
+        src_priority_patterns = ["main.go", "app.go", "server.go"]
+    elif is_rust:
+        src_priority_patterns = ["main.rs", "lib.rs"]
+    else:  # TypeScript/JavaScript default
+        src_priority_patterns = ["app.ts", "index.ts", "main.ts", "server.ts"]
+
     src_files = project_structure.get("src", [])
     for pattern in src_priority_patterns:
         for sf in src_files:
