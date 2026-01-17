@@ -15,7 +15,7 @@ if shared_env.exists():
     load_dotenv(shared_env)
 load_dotenv()  # Local .env can override
 
-from .api import ideas, reviews, status
+from .api import chat, ideas, reviews, status, users
 from .db.repository import repository
 
 # Configure logging
@@ -47,10 +47,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware
+# CORS middleware - configured for Netlify dashboard
+CORS_ORIGINS = [
+    "https://idea-factory.netlify.app",
+    "https://idea-factory-dashboard.netlify.app",
+    "http://localhost:3000",  # Local development
+    "http://localhost:5173",  # Vite dev server
+]
+
+# Allow all origins in development
+if os.environ.get("ENVIRONMENT", "development") == "development":
+    CORS_ORIGINS = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for production
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,6 +71,8 @@ app.add_middleware(
 app.include_router(status.router)
 app.include_router(ideas.router)
 app.include_router(reviews.router)
+app.include_router(users.router)
+app.include_router(chat.router)
 
 
 @app.get("/")
@@ -67,11 +80,17 @@ async def root() -> dict:
     """Root endpoint with API overview."""
     return {
         "service": "Agentic Idea Factory",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "description": "Python-orchestrated idea pipeline with MCP persona agents",
         "endpoints": {
             "health": "GET /health",
             "stats": "GET /api/stats",
+            "users": {
+                "me": "GET /api/users/me",
+                "accept_terms": "POST /api/users/accept-terms",
+                "terms": "GET /api/users/terms",
+                "list": "GET /api/users (admin)",
+            },
             "ideas": {
                 "list": "GET /api/ideas",
                 "create": "POST /api/ideas",
@@ -85,6 +104,11 @@ async def root() -> dict:
                 "submit": "POST /api/reviews/{id}",
                 "get": "GET /api/reviews/{id}",
                 "pending": "GET /api/reviews/pending/count",
+            },
+            "chat": {
+                "vetting": "POST /api/chat/vetting",
+                "get_conversation": "GET /api/chat/vetting/{id}",
+                "delete_conversation": "DELETE /api/chat/vetting/{id}",
             },
         },
         "pipeline_stages": [

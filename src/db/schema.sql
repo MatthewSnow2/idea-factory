@@ -1,7 +1,18 @@
 -- Agentic Idea Factory - SQLite Schema
--- Version: 1.0.0
+-- Version: 1.1.0
 
 PRAGMA foreign_keys = ON;
+
+-- Users table (Netlify Identity integration)
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,          -- Netlify Identity sub
+    email TEXT NOT NULL UNIQUE,
+    name TEXT,
+    role TEXT NOT NULL DEFAULT 'collaborator',
+    terms_accepted_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 
 -- Core ideas table
 CREATE TABLE IF NOT EXISTS ideas (
@@ -15,7 +26,8 @@ CREATE TABLE IF NOT EXISTS ideas (
     updated_at TEXT NOT NULL,
     mode TEXT NOT NULL DEFAULT 'new',  -- 'new', 'existing_complete', 'existing_enhance'
     project_source TEXT,  -- JSON object with source_type, location, branch, subdirectory
-    preferred_tech_stack TEXT  -- JSON array, user override for tech stack decision
+    preferred_tech_stack TEXT,  -- JSON array, user override for tech stack decision
+    submitted_by TEXT REFERENCES users(id)  -- User who submitted the idea
 );
 
 -- Enrichment results (Gemini analysis)
@@ -105,6 +117,8 @@ CREATE TABLE IF NOT EXISTS build_results (
     outcome TEXT,                     -- 'success', 'partial', 'failed'
     started_at TEXT NOT NULL,
     completed_at TEXT,
+    google_drive_url TEXT,            -- URL to download from Drive
+    google_drive_file_id TEXT,        -- Drive file ID for API operations
     FOREIGN KEY (idea_id) REFERENCES ideas(id) ON DELETE CASCADE
 );
 
@@ -136,6 +150,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_ideas_stage ON ideas(current_stage);
 CREATE INDEX IF NOT EXISTS idx_ideas_status ON ideas(current_status);
+CREATE INDEX IF NOT EXISTS idx_ideas_submitted_by ON ideas(submitted_by);
 CREATE INDEX IF NOT EXISTS idx_transitions_idea ON state_transitions(idea_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_idea ON human_reviews(idea_id);
 CREATE INDEX IF NOT EXISTS idx_cache_model ON llm_cache(model);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);

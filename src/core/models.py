@@ -81,6 +81,50 @@ class ReviewDecision(str, Enum):
     DEFER = "defer"
 
 
+class UserRole(str, Enum):
+    """User roles."""
+
+    ADMIN = "admin"
+    COLLABORATOR = "collaborator"
+
+
+# =============================================================================
+# User Models
+# =============================================================================
+
+
+class User(BaseModel):
+    """User record from database."""
+
+    id: str  # Netlify Identity sub
+    email: str
+    name: str | None = None
+    role: UserRole = UserRole.COLLABORATOR
+    terms_accepted_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class UserResponse(BaseModel):
+    """API response for user info."""
+
+    user: User
+    needs_terms_acceptance: bool = False
+
+
+class AcceptTermsInput(BaseModel):
+    """Input for accepting terms of use."""
+
+    accepted: bool = Field(..., description="Must be true to accept terms")
+
+    @model_validator(mode="after")
+    def validate_accepted(self) -> "AcceptTermsInput":
+        """Require explicit acceptance."""
+        if not self.accepted:
+            raise ValueError("You must accept the terms to continue")
+        return self
+
+
 # =============================================================================
 # Input Models
 # =============================================================================
@@ -290,6 +334,7 @@ class Idea(BaseModel):
     mode: ProjectMode = ProjectMode.NEW
     project_source: ProjectSource | None = None
     preferred_tech_stack: list[str] | None = None
+    submitted_by: str | None = None  # User ID who submitted
 
 
 class EnrichmentResult(BaseModel):
@@ -380,6 +425,8 @@ class BuildResult(BaseModel):
     outcome: Literal["success", "partial", "failed"]
     started_at: datetime
     completed_at: datetime | None
+    google_drive_url: str | None = None  # Web view URL
+    google_drive_file_id: str | None = None  # For API operations
 
 
 class StateTransition(BaseModel):

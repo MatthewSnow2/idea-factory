@@ -38,6 +38,8 @@ from ..core.models import (
     Stage,
     StateTransition,
     Status,
+    User,
+    UserRole,
 )
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "idea-factory.db"
@@ -76,10 +78,129 @@ class Repository:
         return self._db
 
     # =========================================================================
+    # Users
+    # =========================================================================
+
+    async def create_user(
+        self,
+        user_id: str,
+        email: str,
+        name: str | None = None,
+        role: str = "collaborator",
+    ) -> User:
+        """Create a new user."""
+        now = datetime.utcnow().isoformat()
+
+        await self.db.execute(
+            """
+            INSERT INTO users (id, email, name, role, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, email, name, role, now, now),
+        )
+        await self.db.commit()
+
+        return User(
+            id=user_id,
+            email=email,
+            name=name,
+            role=UserRole(role),
+            terms_accepted_at=None,
+            created_at=datetime.fromisoformat(now),
+            updated_at=datetime.fromisoformat(now),
+        )
+
+    async def get_user(self, user_id: str) -> User | None:
+        """Get user by ID."""
+        async with self.db.execute(
+            "SELECT * FROM users WHERE id = ?", (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            return self._row_to_user(row)
+
+    async def get_user_by_email(self, email: str) -> User | None:
+        """Get user by email."""
+        async with self.db.execute(
+            "SELECT * FROM users WHERE email = ?", (email,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            return self._row_to_user(row)
+
+    async def update_user(
+        self,
+        user_id: str,
+        email: str | None = None,
+        name: str | None = None,
+    ) -> User | None:
+        """Update user info."""
+        user = await self.get_user(user_id)
+        if not user:
+            return None
+
+        now = datetime.utcnow().isoformat()
+        new_email = email if email is not None else user.email
+        new_name = name if name is not None else user.name
+
+        await self.db.execute(
+            """
+            UPDATE users SET email = ?, name = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (new_email, new_name, now, user_id),
+        )
+        await self.db.commit()
+
+        return await self.get_user(user_id)
+
+    async def accept_terms(self, user_id: str) -> User | None:
+        """Record user's terms acceptance."""
+        user = await self.get_user(user_id)
+        if not user:
+            return None
+
+        now = datetime.utcnow().isoformat()
+
+        await self.db.execute(
+            """
+            UPDATE users SET terms_accepted_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, now, user_id),
+        )
+        await self.db.commit()
+
+        return await self.get_user(user_id)
+
+    async def list_users(self, limit: int = 100, offset: int = 0) -> list[User]:
+        """List all users."""
+        async with self.db.execute(
+            "SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [self._row_to_user(row) for row in rows]
+
+    def _row_to_user(self, row: aiosqlite.Row) -> User:
+        """Convert database row to User model."""
+        return User(
+            id=row["id"],
+            email=row["email"],
+            name=row["name"],
+            role=UserRole(row["role"]) if row["role"] else UserRole.COLLABORATOR,
+            terms_accepted_at=datetime.fromisoformat(row["terms_accepted_at"]) if row["terms_accepted_at"] else None,
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    # =========================================================================
     # Ideas
     # =========================================================================
 
-    async def create_idea(self, input_data: IdeaInput) -> Idea:
+    async def create_idea(self, input_data: IdeaInput, submitted_by: str | None = None) -> Idea:
         """Create a new idea."""
         idea_id = str(uuid4())
         now = datetime.utcnow().isoformat()
@@ -96,8 +217,8 @@ class Repository:
 
         await self.db.execute(
             """
-            INSERT INTO ideas (id, title, raw_content, tags, current_stage, current_status, submitted_at, updated_at, mode, project_source, preferred_tech_stack)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO ideas (id, title, raw_content, tags, current_stage, current_status, submitted_at, updated_at, mode, project_source, preferred_tech_stack, submitted_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 idea_id,
@@ -111,6 +232,7 @@ class Repository:
                 input_data.mode.value,
                 project_source_json,
                 preferred_tech_stack_json,
+                submitted_by,
             ),
         )
         await self.db.commit()
@@ -127,6 +249,7 @@ class Repository:
             mode=input_data.mode,
             project_source=input_data.project_source,
             preferred_tech_stack=input_data.preferred_tech_stack,
+            submitted_by=submitted_by,
         )
 
     async def get_idea(self, idea_id: str) -> Idea | None:
@@ -232,7 +355,34 @@ class Repository:
             mode=ProjectMode(row["mode"]) if row["mode"] else ProjectMode.NEW,
             project_source=project_source,
             preferred_tech_stack=preferred_tech_stack,
+            submitted_by=row["submitted_by"],
         )
+
+    async def list_ideas_by_user(
+        self,
+        user_id: str,
+        stage: Stage | None = None,
+        status: Status | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Idea]:
+        """List ideas submitted by a specific user."""
+        query = "SELECT * FROM ideas WHERE submitted_by = ?"
+        params: list[Any] = [user_id]
+
+        if stage:
+            query += " AND current_stage = ?"
+            params.append(stage.value)
+        if status:
+            query += " AND current_status = ?"
+            params.append(status.value)
+
+        query += " ORDER BY submitted_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        async with self.db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+            return [self._row_to_idea(row) for row in rows]
 
     # =========================================================================
     # Enrichment Results
@@ -639,6 +789,21 @@ class Repository:
             completed_at=datetime.fromisoformat(now),
         )
 
+    async def update_build_drive_info(
+        self, idea_id: str, drive_url: str, drive_file_id: str
+    ) -> BuildResult | None:
+        """Update build result with Google Drive info."""
+        await self.db.execute(
+            """
+            UPDATE build_results
+            SET google_drive_url = ?, google_drive_file_id = ?
+            WHERE idea_id = ?
+            """,
+            (drive_url, drive_file_id, idea_id),
+        )
+        await self.db.commit()
+        return await self.get_build(idea_id)
+
     async def get_build(self, idea_id: str) -> BuildResult | None:
         """Get build result for an idea."""
         async with self.db.execute(
@@ -654,6 +819,8 @@ class Repository:
                 outcome=row["outcome"],
                 started_at=datetime.fromisoformat(row["started_at"]),
                 completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+                google_drive_url=row["google_drive_url"] if "google_drive_url" in row.keys() else None,
+                google_drive_file_id=row["google_drive_file_id"] if "google_drive_file_id" in row.keys() else None,
             )
 
     # =========================================================================

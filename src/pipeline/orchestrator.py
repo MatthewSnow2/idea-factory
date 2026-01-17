@@ -22,8 +22,9 @@ from ..core.models import (
 )
 from ..core.state_machine import state_machine
 from ..db.repository import Repository
+from ..integrations.google_drive import get_drive_service
 from ..notifications.service import NotificationContext, NotificationService, get_notification_service
-from .building import build_project
+from .building import build_project, BUILD_OUTPUT_DIR
 from .enrichment import enrich_idea
 from .evaluation import evaluate_idea
 from .project_analysis import analyze_project
@@ -632,10 +633,19 @@ class PipelineOrchestrator:
             # Save result
             await self.repo.save_build(idea.id, output, started_at)
 
+            # Upload to Google Drive if build succeeded
+            drive_url = None
+            if output.outcome in ("success", "partial"):
+                drive_url = await self._upload_to_drive(idea, enrichment)
+
             # Transition to completed
             idea = await self.repo.update_idea_state(
                 idea.id, Stage.BUILDING, Status.COMPLETED, triggered_by="pipeline"
             )
+
+            message = f"Build completed: {len(output.artifacts)} files generated ({output.outcome})"
+            if drive_url:
+                message += f" - Download: {drive_url}"
 
             logger.info(f"Building completed for idea: {idea.id}")
             return PipelineResult(
@@ -643,7 +653,7 @@ class PipelineOrchestrator:
                 idea=idea,
                 stage=Stage.BUILDING,
                 status=Status.COMPLETED,
-                message=f"Build completed: {len(output.artifacts)} files generated ({output.outcome})",
+                message=message,
             )
 
         except Exception as e:
@@ -661,6 +671,50 @@ class PipelineOrchestrator:
                 status=Status.FAILED,
                 message=f"Building failed: {e}",
             )
+
+    async def _upload_to_drive(self, idea: Idea, enrichment: EnrichmentResult) -> str | None:
+        """Upload build output to Google Drive and share with user.
+
+        Returns the Drive URL or None if upload failed.
+        """
+        try:
+            drive_service = get_drive_service()
+
+            # Get project directory
+            project_dir = BUILD_OUTPUT_DIR / idea.id
+            if not project_dir.exists():
+                logger.warning(f"Project directory not found for upload: {project_dir}")
+                return None
+
+            # Create zip name from title
+            safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in enrichment.enhanced_title)
+            safe_title = safe_title[:50]  # Limit length
+            zip_name = f"{safe_title}-{idea.id[:8]}"
+
+            # Upload as zip
+            file_info = drive_service.upload_directory_as_zip(project_dir, zip_name)
+            file_id = file_info["id"]
+            drive_url = file_info.get("webViewLink") or drive_service.get_file_link(file_id)
+
+            # Update build record with Drive info
+            await self.repo.update_build_drive_info(idea.id, drive_url, file_id)
+
+            # Share with user if we have their info
+            if idea.submitted_by:
+                user = await self.repo.get_user(idea.submitted_by)
+                if user and user.email:
+                    try:
+                        drive_service.share_with_user(file_id, user.email, role="reader")
+                        logger.info(f"Shared build with user: {user.email}")
+                    except Exception as share_err:
+                        logger.warning(f"Failed to share with user {user.email}: {share_err}")
+
+            logger.info(f"Uploaded build to Drive: {drive_url}")
+            return drive_url
+
+        except Exception as e:
+            logger.error(f"Drive upload failed for idea {idea.id}: {e}")
+            return None
 
     async def run_full_pipeline(self, idea_id: str) -> PipelineResult:
         """Run the full pipeline until a HIL gate is reached.

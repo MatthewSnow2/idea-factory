@@ -1,0 +1,25 @@
+# Cloudflare Tunnel Configuration for Idea Factory API
+# Copy this to ~/.cloudflared/config.yml after creating the tunnel
+#
+# Setup:
+#   1. cloudflared tunnel login
+#   2. cloudflared tunnel create idea-factory-api
+#   3. Copy credentials JSON to ~/.cloudflared/
+#   4. Copy this config to ~/.cloudflared/config.yml
+#   5. Update TUNNEL_ID with actual tunnel ID
+#   6. cloudflared tunnel route dns idea-factory-api api.idea-factory.dev
+#   7. sudo systemctl enable cloudflared && sudo systemctl start cloudflared
+
+tunnel: TUNNEL_ID  # Replace with actual tunnel ID from step 2
+credentials-file: /home/ubuntu/.cloudflared/TUNNEL_ID.json
+
+ingress:
+  # Route API traffic to FastAPI server
+  - hostname: api.idea-factory.dev
+    service: http://localhost:8000
+    originRequest:
+      connectTimeout: 30s
+      noTLSVerify: false
+
+  # Catch-all for unmatched requests
+  - service: http_status:404
