@@ -22,7 +22,7 @@ from ..core.models import (
 )
 from ..core.state_machine import state_machine
 from ..db.repository import Repository
-from ..integrations.google_drive import get_drive_service
+from ..integrations.s3_storage import get_s3_service
 from ..notifications.service import NotificationContext, NotificationService, get_notification_service
 from .building import build_project, BUILD_OUTPUT_DIR
 from .enrichment import enrich_idea
@@ -633,10 +633,10 @@ class PipelineOrchestrator:
             # Save result
             await self.repo.save_build(idea.id, output, started_at)
 
-            # Upload to Google Drive if build succeeded
-            drive_url = None
+            # Upload to S3 if build succeeded
+            download_url = None
             if output.outcome in ("success", "partial"):
-                drive_url = await self._upload_to_drive(idea, enrichment)
+                download_url = await self._upload_to_s3(idea, enrichment)
 
             # Transition to completed
             idea = await self.repo.update_idea_state(
@@ -644,8 +644,8 @@ class PipelineOrchestrator:
             )
 
             message = f"Build completed: {len(output.artifacts)} files generated ({output.outcome})"
-            if drive_url:
-                message += f" - Download: {drive_url}"
+            if download_url:
+                message += f" - Download: {download_url}"
 
             logger.info(f"Building completed for idea: {idea.id}")
             return PipelineResult(
@@ -672,13 +672,13 @@ class PipelineOrchestrator:
                 message=f"Building failed: {e}",
             )
 
-    async def _upload_to_drive(self, idea: Idea, enrichment: EnrichmentResult) -> str | None:
-        """Upload build output to Google Drive and share with user.
+    async def _upload_to_s3(self, idea: Idea, enrichment: EnrichmentResult) -> str | None:
+        """Upload build output to S3.
 
-        Returns the Drive URL or None if upload failed.
+        Returns the presigned download URL or None if upload failed.
         """
         try:
-            drive_service = get_drive_service()
+            s3_service = get_s3_service()
 
             # Get project directory
             project_dir = BUILD_OUTPUT_DIR / idea.id
@@ -691,29 +691,19 @@ class PipelineOrchestrator:
             safe_title = safe_title[:50]  # Limit length
             zip_name = f"{safe_title}-{idea.id[:8]}"
 
-            # Upload as zip
-            file_info = drive_service.upload_directory_as_zip(project_dir, zip_name)
-            file_id = file_info["id"]
-            drive_url = file_info.get("webViewLink") or drive_service.get_file_link(file_id)
+            # Upload as zip to S3
+            result = s3_service.upload_directory_as_zip(project_dir, zip_name)
+            download_url = result["download_url"]
+            s3_key = result["key"]
 
-            # Update build record with Drive info
-            await self.repo.update_build_drive_info(idea.id, drive_url, file_id)
+            # Update build record with S3 info
+            await self.repo.update_build_storage_info(idea.id, download_url, s3_key)
 
-            # Share with user if we have their info
-            if idea.submitted_by:
-                user = await self.repo.get_user(idea.submitted_by)
-                if user and user.email:
-                    try:
-                        drive_service.share_with_user(file_id, user.email, role="reader")
-                        logger.info(f"Shared build with user: {user.email}")
-                    except Exception as share_err:
-                        logger.warning(f"Failed to share with user {user.email}: {share_err}")
-
-            logger.info(f"Uploaded build to Drive: {drive_url}")
-            return drive_url
+            logger.info(f"Uploaded build to S3: {s3_key}")
+            return download_url
 
         except Exception as e:
-            logger.error(f"Drive upload failed for idea {idea.id}: {e}")
+            logger.error(f"S3 upload failed for idea {idea.id}: {e}")
             return None
 
     async def run_full_pipeline(self, idea_id: str) -> PipelineResult:

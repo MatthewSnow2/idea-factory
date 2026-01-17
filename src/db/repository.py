@@ -792,7 +792,7 @@ class Repository:
     async def update_build_drive_info(
         self, idea_id: str, drive_url: str, drive_file_id: str
     ) -> BuildResult | None:
-        """Update build result with Google Drive info."""
+        """Update build result with Google Drive info (legacy)."""
         await self.db.execute(
             """
             UPDATE build_results
@@ -800,6 +800,24 @@ class Repository:
             WHERE idea_id = ?
             """,
             (drive_url, drive_file_id, idea_id),
+        )
+        await self.db.commit()
+        return await self.get_build(idea_id)
+
+    async def update_build_storage_info(
+        self, idea_id: str, download_url: str, storage_key: str
+    ) -> BuildResult | None:
+        """Update build result with storage info (S3 or other).
+
+        Reuses the google_drive_* columns for backward compatibility.
+        """
+        await self.db.execute(
+            """
+            UPDATE build_results
+            SET google_drive_url = ?, google_drive_file_id = ?
+            WHERE idea_id = ?
+            """,
+            (download_url, storage_key, idea_id),
         )
         await self.db.commit()
         return await self.get_build(idea_id)

@@ -86,7 +86,8 @@ class GoogleDriveService:
         file = self.service.files().create(
             body=file_metadata,
             media_body=media,
-            fields="id, name, webViewLink, webContentLink"
+            fields="id, name, webViewLink, webContentLink",
+            supportsAllDrives=True
         ).execute()
 
         logger.info(f"Uploaded file: {file_name} -> {file['id']}")
@@ -136,7 +137,8 @@ class GoogleDriveService:
         file = self.service.files().create(
             body=file_metadata,
             media_body=media,
-            fields="id, name, webViewLink, webContentLink"
+            fields="id, name, webViewLink, webContentLink",
+            supportsAllDrives=True
         ).execute()
 
         logger.info(f"Uploaded zip: {zip_name}.zip -> {file['id']}")
@@ -163,7 +165,8 @@ class GoogleDriveService:
             fileId=file_id,
             body=permission,
             sendNotificationEmail=True,
-            emailMessage="Your Idea Factory build is ready!"
+            emailMessage="Your Idea Factory build is ready!",
+            supportsAllDrives=True
         ).execute()
 
         logger.info(f"Shared file {file_id} with {email} as {role}")
@@ -180,7 +183,8 @@ class GoogleDriveService:
         """
         file = self.service.files().get(
             fileId=file_id,
-            fields="webViewLink"
+            fields="webViewLink",
+            supportsAllDrives=True
         ).execute()
         return file.get("webViewLink", f"https://drive.google.com/file/d/{file_id}")
 
@@ -194,7 +198,7 @@ class GoogleDriveService:
             True if deleted successfully
         """
         try:
-            self.service.files().delete(fileId=file_id).execute()
+            self.service.files().delete(fileId=file_id, supportsAllDrives=True).execute()
             logger.info(f"Deleted file: {file_id}")
             return True
         except Exception as e:
