@@ -4,7 +4,7 @@
 set -e
 
 TUNNEL_NAME="idea-factory-api"
-HOSTNAME="api.idea-factory.dev"
+HOSTNAME="api.irhuman.ai"
 
 echo "=== Cloudflare Tunnel Setup for Idea Factory ==="
 echo ""

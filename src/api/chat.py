@@ -10,12 +10,13 @@ from typing import Annotated
 from uuid import uuid4
 
 from anthropic import Anthropic
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..auth.middleware import get_current_user, require_terms_accepted
 from ..core.models import IdeaInput, User
 from ..db.repository import repository
+from ..pipeline.orchestrator import PipelineOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ def extract_submission(text: str) -> dict | None:
 @router.post("/vetting", response_model=ChatResponse)
 async def vetting_chat(
     chat_input: ChatMessage,
+    background_tasks: BackgroundTasks,
     user: Annotated[User, Depends(require_terms_accepted)],
 ) -> ChatResponse:
     """Vetting chatbot endpoint.
@@ -163,6 +165,11 @@ async def vetting_chat(
             idea = await repository.create_idea(idea_input, submitted_by=user.id)
             conv["submitted"] = True
             conv["idea_id"] = idea.id
+
+            # Auto-start the pipeline in background
+            orchestrator = PipelineOrchestrator()
+            background_tasks.add_task(orchestrator.run_full_pipeline, idea.id)
+            logger.info(f"Auto-started pipeline for idea: {idea.id}")
 
             # Clean up the response (remove JSON block)
             clean_message = assistant_message.split("```json")[0].strip()

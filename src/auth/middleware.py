@@ -39,9 +39,9 @@ async def get_current_user(
         )
 
     try:
-        # Verify the token
-        claims = verify_netlify_token(credentials.credentials)
-        user_info = extract_user_info(claims)
+        # Verify the token via Netlify Identity
+        user_data = await verify_netlify_token(credentials.credentials)
+        user_info = extract_user_info(user_data)
 
         # Get or create user in database
         user = await repository.get_user(user_info["id"])
@@ -86,8 +86,8 @@ async def get_optional_user(
         return None
 
     try:
-        claims = verify_netlify_token(credentials.credentials)
-        user_info = extract_user_info(claims)
+        user_data = await verify_netlify_token(credentials.credentials)
+        user_info = extract_user_info(user_data)
         return await repository.get_user(user_info["id"])
     except NetlifyJWTError:
         return None
